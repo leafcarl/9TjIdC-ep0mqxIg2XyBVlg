@@ -17,15 +17,19 @@ var fivebeans = require('fivebeans');
 
 /*
  *  Constant values
- *  mongo_shell: MongoDB host(e.g. mongodb://xxx)
- *  collection_name: target collection to be used at the Mongo host
  *  target_action_url: XE convertor url
  *  tube: tube name at beanstalkd server
  */
-var mongo_shell = 'mongodb://beanstalk:iqbox@ds029630.mongolab.com:29630/aftership_challenge3';
-var collection_name = 'currencies';
-var target_action_url = 'http://www.xe.com/currencyconverter/convert/';
+var target_action_url = 'http://www.xengfiadg.com/currencyconverter/convert/';
 var tube = 'leafcarl';
+
+var aftership_beanstalkd_request_option = {
+    method: 'POST',
+    url: 'http://challenge.aftership.net:9578/v1/beanstalkd',
+    headers: {
+        'aftership-api-key': 'a6403a2b-af21-47c5-aab5-a2420d20bbec'
+    }
+};
 
 /*
  *  Job constant with priority 1, delay 60s, allowed time-to-run 20s, dealy when failure 3s
@@ -34,15 +38,22 @@ var job_const = {
     priority: 1,
     delay: 60,
     ttr: 20,
-    delay_failure: 3
-}
-
-var client = new fivebeans.client('challenge.aftership.net', 11300);
+    delay_failure: 3,
+    failure_threshold: 10
+};
 
 /*
  *  Database API provide connect, insert and close call
+ *  Setup:
+ *  - mongo_shell: MongoDB host(e.g. mongodb://xxx)
+ *  - collection: target collection to be used at the Mongo host
  */
 var database = {
+
+    mongo_shell: 'mongodb://beanstalk:iqbox@ds029630.mongolab.com:29630/aftership_challenge3',
+
+    collection: 'currencies',
+
     db: null,
 
     /*
@@ -50,7 +61,7 @@ var database = {
      *  @para function(): callback function
      */
     connect: function(callback) {
-        mongo_client.connect(mongo_shell, function(err, db) {
+        mongo_client.connect(this.mongo_shell, function(err, db) {
             if (err) throw err;
             this.db = db;
             callback();
@@ -63,8 +74,8 @@ var database = {
      *  @para string: serialized document for insert
      *  @para function(Object): callback function
      */
-    insert: function(collection_name, doc, callback) {
-        db.collection(collection_name).insert(doc, function(err, result) {
+    insert: function(doc, callback) {
+        db.collection(this.collection).insert(doc, function(err, result) {
             if (err) throw err;
             callback(result);
         });
@@ -76,7 +87,17 @@ var database = {
     close: function() {
         db.close();
     }
-}
+};
+
+/*
+ *  Fivebeans beanstalkd client
+ */
+var client;
+
+/*
+ *  Counter for number of failure
+ */
+var failure_counter = 0;
 
 /*
  *  Scrap currency value from the web
@@ -85,7 +106,7 @@ var database = {
  *  @para function(string): callback function
  */
 var currencyScrap = function(from_currency, to_currency, callback) {
-    // generate request detail and header
+    // generate request detail with query parameters and header
     var request_options = {
         url: target_action_url + '?Amount=1&From=' + from_currency + '&To=' + to_currency,
         headers: {
@@ -96,32 +117,25 @@ var currencyScrap = function(from_currency, to_currency, callback) {
     };
     // http request and currency value extraction
     request(request_options, function(err, response, body) {
-        if (err || response.statusCode != 200) throw 'Target unreachable';
-        var $ = cheerio.load(body);
-        var $currency_part = $('.uccResult .ucc-result-table .rightCol');
-        var currency_match = $currency_part.text().trim().match(/[+-]?\d+\.\d+/);
-        if (currency_match == null) throw 'Currency not found';
-        var currency_string = parseFloat(currency_match[0]).toFixed(2).toString();
-        callback(currency_string);
+        if (err || response.statusCode != 200)
+            error = 'Target unreachable';
+        else {
+            var $ = cheerio.load(body);
+            var $currency_part = $('.uccResult .ucc-result-table .rightCol');
+            var currency_match = $currency_part.text().trim().match(/[+-]?\d+\.\d+/);
+            if (currency_match == null || !(currency_match > 0))
+                error = 'Target unreachable';
+            else
+                var currency_string = parseFloat(currency_match[0]).toFixed(2).toString();
+        }
+        callback(error, currency_string);
     });
-}
-
-/*
- *  Submit a job to beanstalkd server
- *  @para number: job delay in seconds
- *  @para string: job payload
- */
-var putJob = function(delay, payload) {
-    client.put(job_const.priority, delay, job_const.ttr, payload, function(err, jobid) {
-        console.log(jobid);
-    });
-}
+};
 
 /*
  *  Consume ready job from beanstalkd server
  */
-var consumeJob = function() {
-    console.log('consumeJob()');
+var consumer = function() {
     // reserve a ready job
     client.reserve(function(err, jobid, payload) {
         console.log('reserve job: ' + jobid);
@@ -132,63 +146,74 @@ var consumeJob = function() {
                 throw new SyntaxError('Payload mismatch');
             }
             // scrap currency value
-            currencyScrap(payload_obj.from, payload_obj.to, function(currency_string) {
+            currencyScrap(payload_obj.from, payload_obj.to, function(error, currency_string) {
+                if (error) throw new Error(error);
                 // insert to db
-                database.insert(collection_name, {
+                database.insert({
                     'from': payload_obj.from,
                     'to': payload_obj.to,
                     'created_at': new Date(),
                     'rate': currency_string
                 }, function(result) {
-                    if (result) console.log('Insert to collection');
+                    if (result) console.log('Insert to collection at ' + new Date());
+                    // release the reserved job with delay
+                    client.release(jobid, job_const.priority, job_const.delay, function(err) {});
+                    failure_counter = 0;
                 });
             });
-            // destroy the ready job
-            client.destroy(jobid, function(err) {});
-            // put a new job with the same payload
-            putJob(job_const.delay, payload);
         } catch (e) {
+            console.log('catch e: ' + e);
             if (e instanceof SyntaxError) {
                 // payload error
                 client.bury(jobid, job_const.priority, function(err) {});
                 console.log('SyntaxError');
             } else if (e == 'Target unreachable' || e == 'Currency not found') {
                 // target web error
-                client.destroy(jobid, function(err) {});
-                // put a new job with shorter delay and the same payload                
-                putJob(job_const.delay_failure, payload);
-                console.log('Target web error');
+                if (++failure_counter > job_const.failure_threshold) throw 'Fail for 10 trials';
+                // release with shorter delay
+                client.release(jobid, job_const.priority, job_const.delay_failure, function(err) {});
+                console.log('Target web error ' + failure_counter + ' times');
+            } else {
+                client.bury(jobid, job_const.priority, function(err) {});
+                throw e;
             }
         } finally {
             // consume next job
-            consumeJob();
+            consumer();
         }
     });
-}
+};
 
 /*
- *  connect and start the beanstalkd client
+ *  Request for the beanstalkd host and start the beanstalkd client
  */
-client
-    .on('connect', function() {
-        // client can now be used
-        console.log('fivebeans connected');
-        database.connect(function() {
-            client.use(tube, function(err, tubename) {
-                client.watch(tube, function(err, numwatched) {
-                    console.log(numwatched);
-                    consumeJob();
+request(aftership_beanstalkd_request_option, function(err, response, body) {
+    if (err || response.statusCode != 200) throw 'Target unreachable';
+    var body_obj = JSON.parse(body);
+    if (body_obj.meta.code == 200) {
+        console.log('Beanstalkd server: ' + body_obj.data.host + ':' + body_obj.data.port);
+        // connect and start the beanstalkd client
+        client = new fivebeans.client(body_obj.data.host, body_obj.data.port);
+        client
+            .on('connect', function() {
+                // client can now be used
+                console.log('fivebeans connected');
+                database.connect(function() {
+                    client.use(tube, function(err, tubename) {
+                        client.watch(tube, function(err, numwatched) {
+                            consumer();
+                        });
+                    });
                 });
-            });
-        });
-    })
-    .on('error', function(err) {
-        // connection failure
-        throw err;
-    })
-    .on('close', function() {
-        // underlying connection has closed
-        console.log('fivebeans closed');
-        database.close();
-    })
-    .connect();
+            })
+            .on('error', function(err) {
+                // connection failure
+                throw err;
+            })
+            .on('close', function() {
+                // underlying connection has closed
+                console.log('fivebeans closed');
+                database.close();
+            }).connect();
+    } else console.log('Beanstalkd server status ' + body_obj.meta.code + ' ' + body_obj.meta.type + ' msg: ' + body_obj.meta.message);
+});

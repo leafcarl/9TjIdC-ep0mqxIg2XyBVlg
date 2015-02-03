@@ -6,5 +6,9 @@
     "cheerio": "~0.18.0",
     "mongodb": "~2.0",
     "fivebeans": "~1.1.1"
+  },
+  "repository": {
+    "type" : "git",
+    "url" : "https://github.com/leafcarl/9TjIdC-ep0mqxIg2XyBVlg"
   }
 }
