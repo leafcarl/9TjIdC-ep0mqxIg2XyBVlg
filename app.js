@@ -23,6 +23,9 @@ var fivebeans = require('fivebeans');
 var target_action_url = 'http://www.xe.com/currencyconverter/convert/';
 var tube = 'leafcarl';
 
+/*
+ *  Request option object for getting beanstalkd host at Aftership
+ */
 var aftership_beanstalkd_request_option = {
     method: 'POST',
     url: 'http://challenge.aftership.net:9578/v1/beanstalkd',
@@ -32,12 +35,12 @@ var aftership_beanstalkd_request_option = {
 };
 
 /*
- *  Job constant with priority 1, delay 60s, allowed time-to-run 20s, dealy when failure 3s
+ *  Job constant with priority 1, delay 60s, allowed time-to-run 10s, dealy when failure 3s
  */
 var job_const = {
     priority: 1,
     delay: 60,
-    ttr: 20,
+    ttr: 10,
     delay_failure: 3,
     failure_threshold: 10
 };
@@ -124,10 +127,12 @@ var currencyScrap = function(from_currency, to_currency, callback) {
             var $ = cheerio.load(body);
             var $currency_part = $('.uccResult .ucc-result-table .rightCol');
             var currency_match = $currency_part.text().trim().match(/[+-]?\d+\.\d+/);
-            if (currency_match == null || !(currency_match > 0))
+            if (currency_match == null || !(currency_match > 0)) {
+                // value not found or invalid value
                 error = 'Currency value not found';
-            else
+            } else {
                 var currency_string = parseFloat(currency_match[0]).toFixed(2).toString();
+            }
         }
         callback(error, currency_string);
     });
@@ -208,7 +213,9 @@ var consumer = function() {
  *  Request for the beanstalkd host and start the beanstalkd client
  */
 request(aftership_beanstalkd_request_option, function(err, response, body) {
-    if (err || response.statusCode != 200) throw 'Aftership Beanstalkd server request fail';
+    if (err || response.statusCode != 200) {
+        throw 'Aftership Beanstalkd server request fail';
+    }
     // convert from string to JSON object
     var body_obj = JSON.parse(body);
     if (body_obj.meta.code == 200) {
@@ -239,6 +246,7 @@ request(aftership_beanstalkd_request_option, function(err, response, body) {
                 database.close();
             }).connect();
     } else {
+        // response with error code
         console.log('Beanstalkd server status ' + body_obj.meta.code + ' ' + body_obj.meta.type + ' msg: ' + body_obj.meta.message);
     }
 });
