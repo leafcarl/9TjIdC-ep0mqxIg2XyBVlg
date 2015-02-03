@@ -103,7 +103,7 @@ var failure_counter = 0;
  *  Scrap currency value from the web
  *  @para string: base currency unit
  *  @para string: target currency unit
- *  @para function(string): callback function
+ *  @para function(string, string): callback function
  */
 var currencyScrap = function(from_currency, to_currency, callback) {
     // generate request detail with query parameters and header
@@ -137,10 +137,8 @@ var currencyScrap = function(from_currency, to_currency, callback) {
  *  Consume ready job from beanstalkd server
  */
 var consumer = function() {
-    console.log('consumer()');
     // reserve a ready job
     client.reserve(function(err, jobid, payload) {
-        console.log('reserve job: ' + jobid);
         try {
             // extract payload
             var payload_obj = JSON.parse(payload);
@@ -158,8 +156,9 @@ var consumer = function() {
                         'created_at': new Date(),
                         'rate': currency_string
                     }, function(result) {
+                        // callback after insert to db
                         if (result.result.ok == 1 && result.result.n == 1) {
-                            console.log('Insert to collection at ' + new Date() + ' delay ' + jobid + job_const.delay);
+                            console.log('Insert to collection at ' + new Date());
                         } else {
                             client.quit();
                             throw new Error('Insertion error');
@@ -172,12 +171,19 @@ var consumer = function() {
                     if (failure_counter >= job_const.failure_threshold) {
                         client.quit();
                         throw 'Fail for 10 trials'
-                    };
+                    }
                     job_delay = job_const.delay_failure;
                 }
+                // reput the job into delay queue
                 client.release(jobid, job_const.priority, job_delay, function(err) {
-                    if (err) throw err;
-                    failure_counter = 0;
+                    // callback after job release
+                    if (err) {
+                        // NOT_FOUND might be caused by short ttr
+                        if (err == 'NOT_FOUND')
+                            throw err + ' for jobid ' + jobid + ', try to set more ttr';
+                        client.quit();
+                        throw err + ' for jobid ' + jobid;
+                    }
                     consumer();
                 });
             });
@@ -187,8 +193,9 @@ var consumer = function() {
                 client.bury(jobid, job_const.priority, function(err) {
                     consumer();
                 });
-                console.log('SyntaxError');
+                console.log('Payload syntaxError');
             } else {
+                // rethrow other exceptions
                 client.bury(jobid, job_const.priority, function(err) {});
                 client.quit();
                 throw e;
@@ -202,6 +209,7 @@ var consumer = function() {
  */
 request(aftership_beanstalkd_request_option, function(err, response, body) {
     if (err || response.statusCode != 200) throw 'Aftership Beanstalkd server request fail';
+    // convert from string to JSON object
     var body_obj = JSON.parse(body);
     if (body_obj.meta.code == 200) {
         console.log('Beanstalkd server: ' + body_obj.data.host + ':' + body_obj.data.port);
@@ -212,6 +220,7 @@ request(aftership_beanstalkd_request_option, function(err, response, body) {
                 // client can now be used
                 console.log('fivebeans connected');
                 database.connect(function() {
+                    // db connect success
                     client.use(tube, function(err, tubename) {
                         client.watch(tube, function(err, numwatched) {
                             // start consumer
