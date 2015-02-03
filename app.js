@@ -31,7 +31,8 @@ var aftership_beanstalkd_request_option = {
     url: 'http://challenge.aftership.net:9578/v1/beanstalkd',
     headers: {
         'aftership-api-key': 'a6403a2b-af21-47c5-aab5-a2420d20bbec'
-    }
+    },
+    timeout: 20000
 };
 
 /*
@@ -116,7 +117,8 @@ var currencyScrap = function(from_currency, to_currency, callback) {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-GB,en;q=0.8,zh-TW;q=0.6,zh;q=0.4',
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/40.0.2214.94 Safari/537.36'
-        }
+        },
+        timeout: 20000
     };
     // http request and currency value extraction
     request(request_options, function(err, response, body) {
