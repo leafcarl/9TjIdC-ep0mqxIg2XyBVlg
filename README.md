@@ -13,4 +13,4 @@
 
 3. execute app.js with your favourite executor
 
-Note: small time-to-run for each job may causes issues, suggested ttr value for 20s(default Linux kernel TCP socket connect timeout)
+Note: small time-to-run for each job may causes issues, suggested ttr value for >20s(default Linux kernel TCP socket connect timeout)
