@@ -20,7 +20,7 @@ var fivebeans = require('fivebeans');
  *  target_action_url: XE convertor url
  *  tube: tube name at beanstalkd server
  */
-var target_action_url = 'http://www.xengfiadg.com/currencyconverter/convert/';
+var target_action_url = 'http://www.xe.com/currencyconverter/convert/';
 var tube = 'leafcarl';
 
 var aftership_beanstalkd_request_option = {
@@ -82,7 +82,7 @@ var database = {
     },
 
     /*
-     *  close db
+     *  close db connection
      */
     close: function() {
         db.close();
@@ -117,14 +117,15 @@ var currencyScrap = function(from_currency, to_currency, callback) {
     };
     // http request and currency value extraction
     request(request_options, function(err, response, body) {
+        var error;
         if (err || response.statusCode != 200)
-            error = 'Target unreachable';
+            error = 'XE target unreachable';
         else {
             var $ = cheerio.load(body);
             var $currency_part = $('.uccResult .ucc-result-table .rightCol');
             var currency_match = $currency_part.text().trim().match(/[+-]?\d+\.\d+/);
             if (currency_match == null || !(currency_match > 0))
-                error = 'Target unreachable';
+                error = 'Currency value not found';
             else
                 var currency_string = parseFloat(currency_match[0]).toFixed(2).toString();
         }
@@ -136,6 +137,7 @@ var currencyScrap = function(from_currency, to_currency, callback) {
  *  Consume ready job from beanstalkd server
  */
 var consumer = function() {
+    console.log('consumer()');
     // reserve a ready job
     client.reserve(function(err, jobid, payload) {
         console.log('reserve job: ' + jobid);
@@ -147,39 +149,50 @@ var consumer = function() {
             }
             // scrap currency value
             currencyScrap(payload_obj.from, payload_obj.to, function(error, currency_string) {
-                if (error) throw new Error(error);
-                // insert to db
-                database.insert({
-                    'from': payload_obj.from,
-                    'to': payload_obj.to,
-                    'created_at': new Date(),
-                    'rate': currency_string
-                }, function(result) {
-                    if (result) console.log('Insert to collection at ' + new Date());
-                    // release the reserved job with delay
-                    client.release(jobid, job_const.priority, job_const.delay, function(err) {});
+                var job_delay = job_const.delay;
+                if (!error) {
+                    // insert to db
+                    database.insert({
+                        'from': payload_obj.from,
+                        'to': payload_obj.to,
+                        'created_at': new Date(),
+                        'rate': currency_string
+                    }, function(result) {
+                        if (result.result.ok == 1 && result.result.n == 1) {
+                            console.log('Insert to collection at ' + new Date() + ' delay ' + jobid + job_const.delay);
+                        } else {
+                            client.quit();
+                            throw new Error('Insertion error');
+                        }
+                    });
                     failure_counter = 0;
+                } else {
+                    // target web error
+                    console.log(++failure_counter + ' target web error: ' + error + ' at ' + new Date());
+                    if (failure_counter >= job_const.failure_threshold) {
+                        client.quit();
+                        throw 'Fail for 10 trials'
+                    };
+                    job_delay = job_const.delay_failure;
+                }
+                client.release(jobid, job_const.priority, job_delay, function(err) {
+                    if (err) throw err;
+                    failure_counter = 0;
+                    consumer();
                 });
             });
         } catch (e) {
-            console.log('catch e: ' + e);
             if (e instanceof SyntaxError) {
                 // payload error
-                client.bury(jobid, job_const.priority, function(err) {});
+                client.bury(jobid, job_const.priority, function(err) {
+                    consumer();
+                });
                 console.log('SyntaxError');
-            } else if (e == 'Target unreachable' || e == 'Currency not found') {
-                // target web error
-                if (++failure_counter > job_const.failure_threshold) throw 'Fail for 10 trials';
-                // release with shorter delay
-                client.release(jobid, job_const.priority, job_const.delay_failure, function(err) {});
-                console.log('Target web error ' + failure_counter + ' times');
             } else {
                 client.bury(jobid, job_const.priority, function(err) {});
+                client.quit();
                 throw e;
             }
-        } finally {
-            // consume next job
-            consumer();
         }
     });
 };
@@ -188,7 +201,7 @@ var consumer = function() {
  *  Request for the beanstalkd host and start the beanstalkd client
  */
 request(aftership_beanstalkd_request_option, function(err, response, body) {
-    if (err || response.statusCode != 200) throw 'Target unreachable';
+    if (err || response.statusCode != 200) throw 'Aftership Beanstalkd server request fail';
     var body_obj = JSON.parse(body);
     if (body_obj.meta.code == 200) {
         console.log('Beanstalkd server: ' + body_obj.data.host + ':' + body_obj.data.port);
@@ -201,6 +214,7 @@ request(aftership_beanstalkd_request_option, function(err, response, body) {
                 database.connect(function() {
                     client.use(tube, function(err, tubename) {
                         client.watch(tube, function(err, numwatched) {
+                            // start consumer
                             consumer();
                         });
                     });
@@ -215,5 +229,7 @@ request(aftership_beanstalkd_request_option, function(err, response, body) {
                 console.log('fivebeans closed');
                 database.close();
             }).connect();
-    } else console.log('Beanstalkd server status ' + body_obj.meta.code + ' ' + body_obj.meta.type + ' msg: ' + body_obj.meta.message);
+    } else {
+        console.log('Beanstalkd server status ' + body_obj.meta.code + ' ' + body_obj.meta.type + ' msg: ' + body_obj.meta.message);
+    }
 });
